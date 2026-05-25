@@ -41,13 +41,17 @@ for target in "${TARGETS[@]}"; do
 
   if [ "$GOOS" = windows ]; then
     (cd dist && zip -qr "${name}.zip" "$name")
+    # also publish the bare .exe as direct, double-clickable downloads
+    for bin in "${BINARIES[@]}"; do
+      cp "${stage}/${bin}.exe" "dist/${bin}.exe"
+    done
   else
     tar -czf "dist/${name}.tar.gz" -C dist "$name"
   fi
   rm -rf "$stage"
 done
 
-(cd dist && sha256sum ./*.zip ./*.tar.gz >checksums.txt)
+(cd dist && sha256sum ./*.exe ./*.zip ./*.tar.gz >checksums.txt)
 
 echo
 echo "artifacts in dist/:"
