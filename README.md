@@ -52,21 +52,34 @@ sync): `baseline.json`, `settings.json`, `backups/<ts>/`, `logs/<ts>.txt`.
 Requires Go 1.24+.
 
 ```sh
-# native
+# native build of both programs
 go build ./cmd/modpack-send ./cmd/modpack-receive
-
-# Windows .exe
-GOOS=windows GOARCH=amd64 go build -o dist/modpack-send.exe   ./cmd/modpack-send
-GOOS=windows GOARCH=amd64 go build -o dist/modpack-receive.exe ./cmd/modpack-receive
-
-# Linux
-GOOS=linux GOARCH=amd64 go build -o dist/modpack-send   ./cmd/modpack-send
-GOOS=linux GOARCH=amd64 go build -o dist/modpack-receive ./cmd/modpack-receive
 
 go test ./...
 ```
 
 The output is a single static binary per program (no runtime dependencies).
+
+### Release builds (all platforms)
+
+`scripts/build-release.sh` cross-compiles both programs for Windows, Linux, and
+macOS and packages each platform into one archive (plus `checksums.txt`) under
+`dist/`:
+
+```sh
+VERSION=v1.0.0 ./scripts/build-release.sh   # VERSION defaults to "dev"
+```
+
+### Cutting a release
+
+`.github/workflows/release.yml` publishes releases automatically:
+
+1. Merge your changes to `main`.
+2. Tag and push: `git tag v1.0.0 && git push origin v1.0.0`.
+
+The workflow builds every platform and attaches the archives to a new GitHub
+Release. Windows users grab `modpack-sync-<version>-windows-amd64.zip` (it holds
+both `.exe` plus these docs) from the repo's **Releases** page.
 
 ## The baseline (the one operational step)
 
