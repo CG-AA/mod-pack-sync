@@ -63,8 +63,8 @@ The output is a single static binary per program (no runtime dependencies).
 ### Release builds (all platforms)
 
 `scripts/build-release.sh` cross-compiles both programs for Windows, Linux, and
-macOS and packages each platform into one archive (plus `checksums.txt`) under
-`dist/`:
+macOS, packages each platform into one archive, also drops the bare Windows
+`.exe` as direct downloads, and writes `checksums.txt` — all under `dist/`:
 
 ```sh
 VERSION=v1.0.0 ./scripts/build-release.sh   # VERSION defaults to "dev"
@@ -77,9 +77,10 @@ VERSION=v1.0.0 ./scripts/build-release.sh   # VERSION defaults to "dev"
 1. Merge your changes to `main`.
 2. Tag and push: `git tag v1.0.0 && git push origin v1.0.0`.
 
-The workflow builds every platform and attaches the archives to a new GitHub
-Release. Windows users grab `modpack-sync-<version>-windows-amd64.zip` (it holds
-both `.exe` plus these docs) from the repo's **Releases** page.
+The workflow builds every platform and attaches the assets to a new GitHub
+Release. Windows users can download the bare `modpack-send.exe` /
+`modpack-receive.exe` directly (no unzip), or the
+`modpack-sync-<version>-windows-amd64.zip` that also bundles these docs.
 
 ## The baseline (the one operational step)
 
