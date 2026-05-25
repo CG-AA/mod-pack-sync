@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/cg-aa/mod-pack-sync/internal/atomicio"
 	"github.com/cg-aa/mod-pack-sync/internal/delta"
 	"github.com/cg-aa/mod-pack-sync/internal/i18n"
 	"github.com/cg-aa/mod-pack-sync/internal/logx"
@@ -51,10 +52,12 @@ func receive(args []string) {
 	langFlag := fs.String("lang", "", "language: en or zh-TW (default: auto-detect)")
 	in := fs.String("in", "", "apply a delta from this file instead of wormhole")
 	relayFlag := fs.String("relay", "", "custom wormhole rendezvous URL")
+	durable := fs.Bool("durable", false, "fsync writes for power-loss durability (slower on many small files)")
 	fs.Parse(args)
 
 	rootDir, settings, log := setup(*rootFlag, *langFlag)
 	defer log.Close()
+	atomicio.Fsync = *durable || settings.Durable
 	log.Say("welcome_receive")
 
 	pkg := *in

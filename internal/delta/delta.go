@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cg-aa/mod-pack-sync/internal/atomicio"
 	"github.com/cg-aa/mod-pack-sync/internal/manifest"
 	"github.com/cg-aa/mod-pack-sync/internal/scan"
 )
@@ -141,6 +142,21 @@ func Apply(zipPath, targetRoot string) (*ApplyResult, error) {
 	backupDir := filepath.Join(targetRoot, filepath.FromSlash(backupRoot), time.Now().Format("20060102-150405"))
 	res := &ApplyResult{BackupDir: backupDir}
 
+	// Write the rollback manifest before the first mutation, so a crash mid-apply
+	// still leaves a recoverable backup (Rollback needs the manifest). It is
+	// written lazily on the first real change, so a no-op apply leaves no backup.
+	manifestSaved := false
+	ensureManifest := func() error {
+		if manifestSaved {
+			return nil
+		}
+		if err := saveManifest(d, filepath.Join(backupDir, manifestName)); err != nil {
+			return err
+		}
+		manifestSaved = true
+		return nil
+	}
+
 	files := make(map[string]*zip.File, len(zr.File))
 	for _, zf := range zr.File {
 		files[zf.Name] = zf
@@ -155,6 +171,9 @@ func Apply(zipPath, targetRoot string) (*ApplyResult, error) {
 			res.Skipped++
 			continue
 		}
+		if err := ensureManifest(); err != nil {
+			return res, err
+		}
 		if err := backup(dst, e.Path, backupDir); err != nil {
 			return res, err
 		}
@@ -162,7 +181,7 @@ func Apply(zipPath, targetRoot string) (*ApplyResult, error) {
 		if !ok {
 			return res, fmt.Errorf("package missing content for %s", e.Path)
 		}
-		if err := extractOne(zf, dst); err != nil {
+		if err := extractOne(zf, dst, e.Hash); err != nil {
 			return res, err
 		}
 		res.Written++
@@ -181,6 +200,9 @@ func Apply(zipPath, targetRoot string) (*ApplyResult, error) {
 			res.Kept++ // receiver changed this base file; leave it alone
 			continue
 		}
+		if err := ensureManifest(); err != nil {
+			return res, err
+		}
 		if err := backup(dst, e.Path, backupDir); err != nil {
 			return res, err
 		}
@@ -190,11 +212,6 @@ func Apply(zipPath, targetRoot string) (*ApplyResult, error) {
 		res.Deleted++
 	}
 
-	if res.Written > 0 || res.Deleted > 0 {
-		if err := saveManifest(d, filepath.Join(backupDir, manifestName)); err != nil {
-			return res, err
-		}
-	}
 	return res, nil
 }
 
@@ -239,8 +256,12 @@ func Rollback(targetRoot string) (string, error) {
 			if err := copyFile(src, dst); err != nil {
 				return backupDir, err
 			}
-		} else {
-			os.Remove(dst) // was newly created by the apply
+		} else if cur, _, herr := scan.HashFile(dst); herr == nil && cur == e.Hash {
+			// No backup and the file holds exactly what the apply wrote: it was
+			// newly created, so remove it. A file whose hash differs (e.g. an
+			// untouched original of an entry a crashed apply never reached) is
+			// left alone.
+			os.Remove(dst)
 		}
 	}
 	for _, e := range d.Delete {
@@ -267,23 +288,33 @@ func safeJoin(root, rel string) (string, error) {
 	return filepath.Join(root, clean), nil
 }
 
-func extractOne(zf *zip.File, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
+func extractOne(zf *zip.File, dst, wantHash string) error {
 	rc, err := zf.Open()
 	if err != nil {
 		return err
 	}
 	defer rc.Close()
-	return writeReader(rc, dst)
+	return atomicio.WriteReaderVerify(dst, rc, 0o644, wantHash)
 }
 
+// backup preserves the current file at src into backupDir before it is
+// overwritten or removed. It hardlinks the file (instant, no data copy — a big
+// win for thousands of small files), falling back to an atomic copy when linking
+// is unsupported (cross-device, FAT/exFAT, Windows). Because the live file is
+// later replaced via atomic rename (a new inode), the hardlinked backup keeps
+// pointing at the original content.
 func backup(src, rel, backupDir string) error {
 	if _, err := os.Stat(src); err != nil {
-		return nil // nothing to back up
+		return nil // nothing to back up (new file)
 	}
-	return copyFile(src, filepath.Join(backupDir, filepath.FromSlash(rel)))
+	dst := filepath.Join(backupDir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	return copyFile(src, dst)
 }
 
 func copyFile(src, dst string) error {
@@ -292,29 +323,13 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	defer in.Close()
-	return writeReader(in, dst)
-}
-
-func writeReader(r io.Reader, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	_, err = io.Copy(out, r)
-	return err
+	return atomicio.WriteReader(dst, in, 0o644)
 }
 
 func saveManifest(d *manifest.Delta, path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return atomicio.WriteFile(path, data, 0o644)
 }

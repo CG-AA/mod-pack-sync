@@ -1,13 +1,53 @@
 package delta
 
 import (
+	"archive/zip"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/cg-aa/mod-pack-sync/internal/atomicio"
 	"github.com/cg-aa/mod-pack-sync/internal/manifest"
 	"github.com/cg-aa/mod-pack-sync/internal/scan"
 )
+
+func sumStr(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+func buildRawZip(t *testing.T, path string, d manifest.Delta, contents map[string]string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	zw := zip.NewWriter(f)
+	mw, err := zw.Create(manifestName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewEncoder(mw).Encode(d); err != nil {
+		t.Fatal(err)
+	}
+	for rel, c := range contents {
+		w, err := zw.Create(filePrefix + rel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(c)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func write(t *testing.T, root, rel, content string) {
 	t.Helper()
@@ -141,6 +181,95 @@ func TestGuardedDeleteKeepsModifiedBaseFile(t *testing.T) {
 	}
 	if c, ok := read(t, recv, "mods/gone.jar"); !ok || c != "i-changed-this" {
 		t.Errorf("modified base file should be kept, got %q/%v", c, ok)
+	}
+}
+
+func TestExtractVerifyRejectsCorruptContent(t *testing.T) {
+	// A package whose stored bytes do not match the manifest hash must be rejected
+	// before the live file is touched.
+	dir := t.TempDir()
+	pkg := filepath.Join(dir, "bad.zip")
+	d := manifest.Delta{
+		Pack:  "test",
+		Write: []manifest.FileEntry{{Path: "mods/x.jar", Size: 4, Hash: sumStr("good")}},
+	}
+	buildRawZip(t, pkg, d, map[string]string{"mods/x.jar": "BAD!"})
+
+	recv := t.TempDir()
+	write(t, recv, "mods/x.jar", "orig")
+
+	if _, err := Apply(pkg, recv); err == nil {
+		t.Fatal("expected apply to fail on content hash mismatch")
+	}
+	if c, _ := read(t, recv, "mods/x.jar"); c != "orig" {
+		t.Errorf("corrupt content must not replace the live file, got %q", c)
+	}
+}
+
+func TestRollbackHashGuard(t *testing.T) {
+	// Reproduce the on-disk state a crash mid-apply would leave and confirm
+	// Rollback restores completed changes without destroying an untouched original.
+	target := t.TempDir()
+	write(t, target, "over.txt", "new-content")           // overwrite that completed
+	write(t, target, "created.txt", "created-content")    // new file that completed
+	write(t, target, "untouched.txt", "original-content") // overwrite not yet reached
+
+	d := &manifest.Delta{
+		Pack: "test",
+		Write: []manifest.FileEntry{
+			{Path: "over.txt", Hash: sumStr("new-content")},
+			{Path: "created.txt", Hash: sumStr("created-content")},
+			{Path: "untouched.txt", Hash: sumStr("would-be-applied")}, // != on-disk
+		},
+	}
+	backupDir := filepath.Join(target, ".modpack-sync", "backups", "20990101-000000")
+	if err := saveManifest(d, filepath.Join(backupDir, manifestName)); err != nil {
+		t.Fatal(err)
+	}
+	write(t, backupDir, "over.txt", "old-content") // pre-apply backup of the overwrite
+
+	if _, err := Rollback(target); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := read(t, target, "over.txt"); c != "old-content" {
+		t.Errorf("over.txt should be restored from backup, got %q", c)
+	}
+	if _, ok := read(t, target, "created.txt"); ok {
+		t.Error("created.txt (newly created, matches applied hash) should be removed")
+	}
+	if c, _ := read(t, target, "untouched.txt"); c != "original-content" {
+		t.Errorf("untouched original must be preserved, got %q", c)
+	}
+}
+
+func TestBackupHardlink(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "live.txt")
+	if err := os.WriteFile(src, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	backupDir := filepath.Join(dir, "bk")
+	if err := backup(src, "live.txt", backupDir); err != nil {
+		t.Fatal(err)
+	}
+	bk := filepath.Join(backupDir, "live.txt")
+	si, _ := os.Stat(src)
+	bi, err := os.Stat(bk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(si, bi) {
+		t.Skip("filesystem does not support hardlinks; copy fallback path")
+	}
+	// Atomic replace of the live file must leave the hardlinked backup untouched.
+	if err := atomicio.WriteReader(src, strings.NewReader("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := os.ReadFile(bk); string(c) != "old" {
+		t.Errorf("backup content changed after atomic overwrite: %q", c)
+	}
+	if c, _ := os.ReadFile(src); string(c) != "new" {
+		t.Errorf("live file = %q, want new", c)
 	}
 }
 

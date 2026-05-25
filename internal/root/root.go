@@ -22,6 +22,7 @@ type Settings struct {
 	Label    string   `json:"label"`    // human label for the pack
 	Relay    string   `json:"relay"`    // custom wormhole rendezvous URL
 	Excludes []string `json:"excludes"` // extra exclude patterns
+	Durable  bool     `json:"durable"`  // fsync writes for power-loss durability
 }
 
 // Resolve returns the instance root. If override is non-empty it is used as-is;

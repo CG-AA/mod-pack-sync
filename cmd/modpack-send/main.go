@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/cg-aa/mod-pack-sync/internal/atomicio"
 	"github.com/cg-aa/mod-pack-sync/internal/delta"
 	"github.com/cg-aa/mod-pack-sync/internal/i18n"
 	"github.com/cg-aa/mod-pack-sync/internal/logx"
@@ -70,16 +71,32 @@ func label(s root.Settings, rootDir, override string) string {
 	return filepath.Base(rootDir)
 }
 
+// loadCache returns the scan hash cache to use, honoring --rehash and --no-cache.
+func loadCache(rootDir string, rehash, noCache bool) *scan.HashCache {
+	if noCache {
+		return nil
+	}
+	p := filepath.Join(root.StateDir(rootDir), "hashcache.json")
+	if rehash {
+		return scan.NewHashCache(p)
+	}
+	return scan.LoadHashCache(p)
+}
+
 func send(args []string) {
 	fs := flag.NewFlagSet("modpack-send", flag.ExitOnError)
 	rootFlag := fs.String("root", "", "instance root (default: the program's own folder)")
 	langFlag := fs.String("lang", "", "language: en or zh-TW (default: auto-detect)")
 	out := fs.String("out", "", "write the delta to this file instead of sending over wormhole")
 	relayFlag := fs.String("relay", "", "custom wormhole rendezvous URL")
+	durable := fs.Bool("durable", false, "fsync writes for power-loss durability (slower on many small files)")
+	rehash := fs.Bool("rehash", false, "ignore the scan hash cache and re-hash every file")
+	noCache := fs.Bool("no-cache", false, "do not read or write the scan hash cache")
 	fs.Parse(args)
 
 	c := setup(*rootFlag, *langFlag)
 	defer c.log.Close()
+	atomicio.Fsync = *durable || c.settings.Durable
 	c.log.Say("welcome_send")
 
 	blPath := root.BaselinePath(c.rootDir)
@@ -91,9 +108,13 @@ func send(args []string) {
 
 	c.log.Say("scanning")
 	ex := excluder(c.settings)
-	working, err := scan.Walk(c.rootDir, ex)
+	cache := loadCache(c.rootDir, *rehash, *noCache)
+	working, err := scan.WalkCached(c.rootDir, ex, cache)
 	if err != nil {
 		c.log.Fatal(err)
+	}
+	if cache != nil {
+		_ = cache.Save()
 	}
 
 	d := delta.Compute(base.Pack, base.Version, working, base, ex)
@@ -142,16 +163,24 @@ func captureBaseline(args []string) {
 	langFlag := fs.String("lang", "", "language: en or zh-TW (default: auto-detect)")
 	labelFlag := fs.String("label", "", "human label for this pack (default: folder name)")
 	versionFlag := fs.String("version", "", "pack version label")
+	durable := fs.Bool("durable", false, "fsync writes for power-loss durability (slower on many small files)")
+	rehash := fs.Bool("rehash", false, "ignore the scan hash cache and re-hash every file")
+	noCache := fs.Bool("no-cache", false, "do not read or write the scan hash cache")
 	fs.Parse(args)
 
 	c := setup(*rootFlag, *langFlag)
 	defer c.log.Close()
+	atomicio.Fsync = *durable || c.settings.Durable
 
 	c.log.Say("capturing_baseline")
 	ex := excluder(c.settings)
-	files, err := scan.Walk(c.rootDir, ex)
+	cache := loadCache(c.rootDir, *rehash, *noCache)
+	files, err := scan.WalkCached(c.rootDir, ex, cache)
 	if err != nil {
 		c.log.Fatal(err)
+	}
+	if cache != nil {
+		_ = cache.Save()
 	}
 	b := &manifest.Baseline{
 		Pack:    label(c.settings, c.rootDir, *labelFlag),

@@ -5,13 +5,17 @@ package scan
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
+	"github.com/cg-aa/mod-pack-sync/internal/atomicio"
 	"github.com/cg-aa/mod-pack-sync/internal/manifest"
 )
 
@@ -118,7 +122,22 @@ func path(rel string) string {
 // Walk scans root, returning hashed entries for every non-excluded regular
 // file, sorted by path. Symlinks are skipped.
 func Walk(root string, ex *Excluder) ([]manifest.FileEntry, error) {
-	var entries []manifest.FileEntry
+	return WalkCached(root, ex, nil)
+}
+
+// WalkCached is Walk with an optional hash cache: a file whose size and mtime
+// match a cached entry reuses the stored hash instead of re-reading it, which is
+// a large speedup for packs with thousands of small files. Pass nil to hash
+// everything. Hashing runs on a bounded worker pool (tiny-file hashing is
+// IO/syscall-bound, so parallelism hides latency). The cache is updated in place;
+// the caller is responsible for persisting it with (*HashCache).Save.
+func WalkCached(root string, ex *Excluder, cache *HashCache) ([]manifest.FileEntry, error) {
+	type job struct {
+		abs, rel string
+		size     int64
+		modNs    int64
+	}
+	var jobs []job
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -143,15 +162,60 @@ func Walk(root string, ex *Excluder) ([]manifest.FileEntry, error) {
 		if ex.Match(rel) {
 			return nil
 		}
-		h, size, herr := HashFile(p)
-		if herr != nil {
-			return herr
+		info, ierr := d.Info()
+		if ierr != nil {
+			return ierr
 		}
-		entries = append(entries, manifest.FileEntry{Path: rel, Size: size, Hash: h})
+		jobs = append(jobs, job{abs: p, rel: rel, size: info.Size(), modNs: info.ModTime().UnixNano()})
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	entries := make([]manifest.FileEntry, len(jobs))
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 8 {
+		workers = 8
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
+	for i := range jobs {
+		jb := jobs[i]
+		if cache != nil {
+			if h, ok := cache.get(jb.rel, jb.size, jb.modNs); ok {
+				entries[i] = manifest.FileEntry{Path: jb.rel, Size: jb.size, Hash: h}
+				continue
+			}
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, jb job) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			h, size, herr := HashFile(jb.abs)
+			if herr != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = herr
+				}
+				errMu.Unlock()
+				return
+			}
+			entries[i] = manifest.FileEntry{Path: jb.rel, Size: size, Hash: h}
+			if cache != nil {
+				cache.put(jb.rel, size, jb.modNs, h)
+			}
+		}(i, jb)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
 	return entries, nil
@@ -170,4 +234,70 @@ func HashFile(p string) (string, int64, error) {
 		return "", 0, err
 	}
 	return hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+type cacheEntry struct {
+	Size  int64  `json:"size"`
+	ModNs int64  `json:"mod_ns"`
+	Hash  string `json:"hash"`
+}
+
+// HashCache memoizes file hashes keyed by (instance-relative path, size, mtime),
+// so an unchanged file is not re-read on the next scan — a large speedup for
+// packs with thousands of small files. A change in size or mtime invalidates the
+// entry. Reads come from the previously-loaded set; every file seen during a scan
+// is recorded into a fresh set, so Save persists only currently-present files and
+// entries for deleted files are pruned automatically. Safe for concurrent use.
+type HashCache struct {
+	path  string
+	mu    sync.Mutex
+	old   map[string]cacheEntry // loaded from disk, read-only during a scan
+	fresh map[string]cacheEntry // files observed this scan, persisted by Save
+}
+
+// LoadHashCache reads the cache at path; a missing or corrupt file yields an
+// empty (but usable) cache.
+func LoadHashCache(path string) *HashCache {
+	c := NewHashCache(path)
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &c.old)
+	}
+	return c
+}
+
+// NewHashCache returns an empty cache bound to path: nothing is reused (every
+// file is re-hashed), but Save still persists the fresh results. Use it for a
+// forced re-hash that keeps the cache warm for next time.
+func NewHashCache(path string) *HashCache {
+	return &HashCache{path: path, old: map[string]cacheEntry{}, fresh: map[string]cacheEntry{}}
+}
+
+func (c *HashCache) get(rel string, size, modNs int64) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.old[rel]; ok && e.Size == size && e.ModNs == modNs {
+		c.fresh[rel] = e // carry the still-valid entry into the persisted set
+		return e.Hash, true
+	}
+	return "", false
+}
+
+func (c *HashCache) put(rel string, size, modNs int64, hash string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.fresh[rel] = cacheEntry{Size: size, ModNs: modNs, Hash: hash}
+}
+
+// Save writes the freshly-observed entries to the cache path atomically.
+func (c *HashCache) Save() error {
+	if c == nil || c.path == "" {
+		return nil
+	}
+	c.mu.Lock()
+	data, err := json.MarshalIndent(c.fresh, "", "  ")
+	c.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return atomicio.WriteFile(c.path, data, 0o644)
 }

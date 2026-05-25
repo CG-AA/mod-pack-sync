@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"os"
 	"time"
+
+	"github.com/cg-aa/mod-pack-sync/internal/atomicio"
 )
 
 // FileEntry describes a single file by its instance-relative path (always
@@ -67,11 +69,11 @@ func LoadBaseline(path string) (*Baseline, error) {
 	return &b, nil
 }
 
-// Save writes the baseline manifest as indented JSON.
+// Save writes the baseline manifest as indented JSON, atomically.
 func (b *Baseline) Save(path string) error {
 	data, err := json.MarshalIndent(b, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return atomicio.WriteFile(path, data, 0o644)
 }
