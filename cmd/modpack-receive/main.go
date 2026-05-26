@@ -53,6 +53,8 @@ func receive(args []string) {
 	in := fs.String("in", "", "apply a delta from this file instead of wormhole")
 	relayFlag := fs.String("relay", "", "custom wormhole rendezvous URL")
 	durable := fs.Bool("durable", false, "fsync writes for power-loss durability (slower on many small files)")
+	retriesFlag := fs.Int("retries", 0, "transfer attempts before giving up (default 3)")
+	retryTimeout := fs.Duration("retry-timeout", time.Hour, "per-attempt transfer timeout")
 	fs.Parse(args)
 
 	rootDir, settings, log := setup(*rootFlag, *langFlag)
@@ -62,12 +64,6 @@ func receive(args []string) {
 
 	pkg := *in
 	if pkg == "" {
-		code := log.Prompt("enter_code")
-		if code == "" {
-			log.Say("cancelled")
-			log.PauseIfWindows()
-			return
-		}
 		relay := *relayFlag
 		if relay == "" {
 			relay = settings.Relay
@@ -76,11 +72,31 @@ func receive(args []string) {
 		if err := os.MkdirAll(filepath.Dir(pkg), 0o755); err != nil {
 			log.Fatal(err)
 		}
-		log.Say("receiving")
-		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
-		defer cancel()
-		if err := transport.Receive(ctx, relay, code, pkg, log.Progress); err != nil {
-			log.Fatal(err)
+		retries := resolveRetries(*retriesFlag, settings.Retries)
+		var rerr error
+		for attempt := 1; attempt <= retries; attempt++ {
+			// Each attempt needs a fresh code: a dropped wormhole transfer cannot
+			// resume, so the sender generates a new code on its retry.
+			code := log.Prompt("enter_code")
+			if code == "" {
+				log.Say("cancelled")
+				log.PauseIfWindows()
+				return
+			}
+			log.Say("receiving")
+			ctx, cancel := context.WithTimeout(context.Background(), *retryTimeout)
+			rerr = transport.Receive(ctx, relay, code, pkg, log.Progress)
+			cancel()
+			if rerr == nil {
+				break
+			}
+			if attempt < retries {
+				log.Say("receive_retry", attempt, retries)
+				backoff(attempt)
+			}
+		}
+		if rerr != nil {
+			log.Fatal(rerr)
 		}
 		defer os.Remove(pkg)
 	} else {
@@ -97,6 +113,27 @@ func receive(args []string) {
 		log.Say("apply_kept", res.Kept)
 	}
 	log.PauseIfWindows()
+}
+
+// resolveRetries picks the attempt count: the flag if set, else the setting,
+// else a default of 3.
+func resolveRetries(flag, setting int) int {
+	if flag > 0 {
+		return flag
+	}
+	if setting > 0 {
+		return setting
+	}
+	return 3
+}
+
+// backoff sleeps for a capped exponential delay before retry attempt+1.
+func backoff(attempt int) {
+	d := time.Duration(1<<attempt) * time.Second // 2s, 4s, 8s, ...
+	if d > 16*time.Second {
+		d = 16 * time.Second
+	}
+	time.Sleep(d)
 }
 
 func rollback(args []string) {

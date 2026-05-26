@@ -92,6 +92,8 @@ func send(args []string) {
 	durable := fs.Bool("durable", false, "fsync writes for power-loss durability (slower on many small files)")
 	rehash := fs.Bool("rehash", false, "ignore the scan hash cache and re-hash every file")
 	noCache := fs.Bool("no-cache", false, "do not read or write the scan hash cache")
+	retriesFlag := fs.Int("retries", 0, "transfer attempts before giving up (default 3)")
+	retryTimeout := fs.Duration("retry-timeout", time.Hour, "per-attempt transfer timeout")
 	fs.Parse(args)
 
 	c := setup(*rootFlag, *langFlag)
@@ -143,18 +145,52 @@ func send(args []string) {
 	if relay == "" {
 		relay = c.settings.Relay
 	}
+	retries := resolveRetries(*retriesFlag, c.settings.Retries)
 	c.log.Say("sending")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
-	defer cancel()
-	err = transport.SendFile(ctx, relay, pkg,
-		func(code string) { c.log.Raw(code); c.log.Say("send_waiting") },
-		c.log.Progress)
-	os.Remove(pkg)
-	if err != nil {
-		c.log.Fatal(err)
+	var sendErr error
+	for attempt := 1; attempt <= retries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), *retryTimeout)
+		sendErr = transport.SendFile(ctx, relay, pkg,
+			func(code string) { c.log.Raw(code); c.log.Say("send_waiting") },
+			c.log.Progress)
+		cancel()
+		if sendErr == nil {
+			break
+		}
+		if attempt < retries {
+			c.log.Say("send_retry", attempt, retries)
+			backoff(attempt)
+		}
 	}
+	if sendErr != nil {
+		// Keep the prepared package so the user can retry without re-scanning.
+		c.log.Say("send_failed_kept", pkg)
+		c.log.Fatal(sendErr)
+	}
+	os.Remove(pkg)
 	c.log.Say("send_done")
 	c.log.PauseIfWindows()
+}
+
+// resolveRetries picks the attempt count: the flag if set, else the setting,
+// else a default of 3.
+func resolveRetries(flag, setting int) int {
+	if flag > 0 {
+		return flag
+	}
+	if setting > 0 {
+		return setting
+	}
+	return 3
+}
+
+// backoff sleeps for a capped exponential delay before retry attempt+1.
+func backoff(attempt int) {
+	d := time.Duration(1<<attempt) * time.Second // 2s, 4s, 8s, ...
+	if d > 16*time.Second {
+		d = 16 * time.Second
+	}
+	time.Sleep(d)
 }
 
 func captureBaseline(args []string) {

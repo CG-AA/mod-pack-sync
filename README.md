@@ -38,14 +38,16 @@ cmd/modpack-receive/   receiver: receive (default) + rollback
 internal/manifest/     baseline + delta JSON formats
 internal/scan/         file walk + sha256 + exclude matcher
 internal/delta/        Compute / Pack / Apply / Rollback
-internal/transport/    magic-wormhole send/receive
+internal/atomicio/     atomic (temp+rename) verified file writes
+internal/transport/    magic-wormhole send/receive (auto-retry)
 internal/root/         resolve instance root + optional settings
 internal/i18n/         en / zh-TW message catalog
 internal/logx/         localized output teed to a log file
 ```
 
 All runtime state lives under `<root>/.modpack-sync/` (and is excluded from the
-sync): `baseline.json`, `settings.json`, `backups/<ts>/`, `logs/<ts>.txt`.
+sync): `baseline.json`, `settings.json`, `backups/<ts>/`, `logs/<ts>.txt`,
+`hashcache.json` (scan speedup).
 
 ## Build
 
@@ -125,6 +127,17 @@ modpack-receive rollback
 Common flags: `--root DIR` (default: the program's own folder), `--lang en|zh-TW`
 (default: auto-detect, falling back to Traditional Chinese), `--relay URL`.
 
+Reliability / performance flags:
+
+- `--durable` (both) — fsync writes so they survive a power loss, at the cost of
+  speed on packs with many small files. Off by default; temp+rename already
+  prevents torn files on a normal crash/Ctrl-C.
+- `--retries N` / `--retry-timeout DUR` (both) — wormhole transfer attempts and
+  per-attempt timeout (default 3 attempts, 1h each). A dropped transfer cannot
+  resume, so each retry uses a fresh code; the sender keeps the prepared package
+  on failure so you can retry without re-scanning.
+- `--rehash` / `--no-cache` (sender) — ignore or disable the scan hash cache.
+
 ## Settings (optional)
 
 `<root>/.modpack-sync/settings.json` — for the double-click user who can't pass
@@ -135,7 +148,9 @@ flags. Everything is optional; zero config works.
   "lang": "zh-TW",
   "label": "MCE2",
   "relay": "",
-  "excludes": ["mods/clientonly-mod.jar", "config/some-personal.toml"]
+  "excludes": ["mods/clientonly-mod.jar", "config/some-personal.toml"],
+  "durable": false,
+  "retries": 3
 }
 ```
 
@@ -148,10 +163,19 @@ Add pack-specific entries via `settings.json`.
 
 ## Safety
 
-- Every overwritten/deleted file is copied to `.modpack-sync/backups/<ts>/`
-  before any change; the applied manifest is saved alongside it.
+- **Atomic, verified writes:** every file is written to a temp file in the same
+  directory and renamed into place, so an interrupted apply (Ctrl-C, kill,
+  dropped transfer, disk-full) never leaves a torn file in the live install.
+  Extracted files are sha256-checked against the manifest before the rename, so
+  corrupt content is rejected rather than installed.
+- Every overwritten/deleted file is preserved in `.modpack-sync/backups/<ts>/`
+  before any change (by hardlink where possible, so it is instant and uses no
+  extra space). The rollback manifest is written *before* the first change, so a
+  crash mid-apply is still recoverable.
 - `modpack-receive rollback` restores the latest backup exactly, including
-  removing files the apply newly created.
+  removing files the apply newly created. A file with no backup is only removed
+  if its content matches what the apply wrote, so a partial apply never deletes
+  an untouched original.
 - Deletes are hash-guarded: a base file is only removed if it still matches the
   baseline, so receiver-modified base files are kept.
 - Package paths are validated to stay inside the instance root (no `..`/abs

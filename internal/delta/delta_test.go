@@ -242,6 +242,36 @@ func TestRollbackHashGuard(t *testing.T) {
 	}
 }
 
+func TestPackCompressionMethod(t *testing.T) {
+	working := t.TempDir()
+	write(t, working, "mods/a.jar", strings.Repeat("payload", 500))   // already-compressed type
+	write(t, working, "config/b.toml", strings.Repeat("hello ", 500)) // compressible text
+	entries, err := scan.Walk(working, scan.NewExcluder(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := manifest.Delta{Pack: "t", Write: entries}
+	pkg := filepath.Join(t.TempDir(), "d.zip")
+	if err := Pack(pkg, working, d); err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.OpenReader(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	methods := map[string]uint16{}
+	for _, f := range zr.File {
+		methods[f.Name] = f.Method
+	}
+	if m := methods[filePrefix+"mods/a.jar"]; m != zip.Store {
+		t.Errorf("jar method = %d, want Store (%d)", m, zip.Store)
+	}
+	if m := methods[filePrefix+"config/b.toml"]; m != zip.Deflate {
+		t.Errorf("toml method = %d, want Deflate (%d)", m, zip.Deflate)
+	}
+}
+
 func TestBackupHardlink(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "live.txt")

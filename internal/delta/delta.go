@@ -63,7 +63,10 @@ func Pack(outPath, workingRoot string, d manifest.Delta) error {
 		return err
 	}
 	for _, e := range d.Write {
-		w, err := zw.Create(filePrefix + e.Path)
+		w, err := zw.CreateHeader(&zip.FileHeader{
+			Name:   filePrefix + e.Path,
+			Method: storeMethod(e.Path),
+		})
 		if err != nil {
 			return err
 		}
@@ -78,6 +81,25 @@ func Pack(outPath, workingRoot string, d manifest.Delta) error {
 		}
 	}
 	return zw.Close()
+}
+
+// storedExts are file types that are already compressed; re-running them through
+// DEFLATE wastes CPU for no size gain (and often grows them slightly), so they
+// are stored uncompressed in the package. The bulk of a modpack by size is jars.
+var storedExts = map[string]bool{
+	".jar": true, ".zip": true, ".jmod": true, ".gz": true, ".tgz": true,
+	".xz": true, ".zst": true, ".bz2": true, ".7z": true, ".rar": true,
+	".png": true, ".jpg": true, ".jpeg": true, ".webp": true, ".gif": true,
+	".ogg": true, ".mp3": true,
+}
+
+// storeMethod picks zip.Store for already-compressed files and zip.Deflate for
+// everything else (configs, scripts, JSON, which compress well).
+func storeMethod(name string) uint16 {
+	if storedExts[strings.ToLower(filepath.Ext(name))] {
+		return zip.Store
+	}
+	return zip.Deflate
 }
 
 func writeManifest(zw *zip.Writer, d manifest.Delta) error {

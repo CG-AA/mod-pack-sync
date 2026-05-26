@@ -72,6 +72,18 @@ var catalog = map[string]map[Lang]string{
 		EN:   "Transfer complete.",
 		ZHTW: "傳送完成。",
 	},
+	"send_retry": {
+		EN:   "Send failed (attempt %d of %d). Retrying shortly with a new code...",
+		ZHTW: "傳送失敗（第 %d/%d 次嘗試）。稍後將以新代碼重試…",
+	},
+	"receive_retry": {
+		EN:   "Receive failed (attempt %d of %d). Ask the sender for the new code and try again.",
+		ZHTW: "接收失敗（第 %d/%d 次嘗試）。請向傳送方索取新的代碼後再試一次。",
+	},
+	"send_failed_kept": {
+		EN:   "Could not send the update. The prepared package was kept so you can retry: %s",
+		ZHTW: "無法傳送更新。已保留準備好的更新包，方便你重試：%s",
+	},
 	"delta_summary": {
 		EN:   "Delta: %d files to send, %d to remove (%s).",
 		ZHTW: "差異：%d 個檔案要傳送，%d 個要移除（%s）。",

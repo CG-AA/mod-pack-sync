@@ -23,6 +23,7 @@ type Settings struct {
 	Relay    string   `json:"relay"`    // custom wormhole rendezvous URL
 	Excludes []string `json:"excludes"` // extra exclude patterns
 	Durable  bool     `json:"durable"`  // fsync writes for power-loss durability
+	Retries  int      `json:"retries"`  // transfer attempts before giving up (default 3)
 }
 
 // Resolve returns the instance root. If override is non-empty it is used as-is;
