@@ -72,7 +72,7 @@ func receive(args []string) {
 		if err := os.MkdirAll(filepath.Dir(pkg), 0o755); err != nil {
 			log.Fatal(err)
 		}
-		retries := resolveRetries(*retriesFlag, settings.Retries)
+		retries := transport.Attempts(*retriesFlag, settings.Retries)
 		var rerr error
 		for attempt := 1; attempt <= retries; attempt++ {
 			// Each attempt needs a fresh code: a dropped wormhole transfer cannot
@@ -92,7 +92,7 @@ func receive(args []string) {
 			}
 			if attempt < retries {
 				log.Say("receive_retry", attempt, retries)
-				backoff(attempt)
+				transport.Backoff(attempt)
 			}
 		}
 		if rerr != nil {
@@ -113,27 +113,6 @@ func receive(args []string) {
 		log.Say("apply_kept", res.Kept)
 	}
 	log.PauseIfWindows()
-}
-
-// resolveRetries picks the attempt count: the flag if set, else the setting,
-// else a default of 3.
-func resolveRetries(flag, setting int) int {
-	if flag > 0 {
-		return flag
-	}
-	if setting > 0 {
-		return setting
-	}
-	return 3
-}
-
-// backoff sleeps for a capped exponential delay before retry attempt+1.
-func backoff(attempt int) {
-	d := time.Duration(1<<attempt) * time.Second // 2s, 4s, 8s, ...
-	if d > 16*time.Second {
-		d = 16 * time.Second
-	}
-	time.Sleep(d)
 }
 
 func rollback(args []string) {

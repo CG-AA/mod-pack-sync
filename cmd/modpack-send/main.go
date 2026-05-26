@@ -145,7 +145,7 @@ func send(args []string) {
 	if relay == "" {
 		relay = c.settings.Relay
 	}
-	retries := resolveRetries(*retriesFlag, c.settings.Retries)
+	retries := transport.Attempts(*retriesFlag, c.settings.Retries)
 	c.log.Say("sending")
 	var sendErr error
 	for attempt := 1; attempt <= retries; attempt++ {
@@ -159,7 +159,7 @@ func send(args []string) {
 		}
 		if attempt < retries {
 			c.log.Say("send_retry", attempt, retries)
-			backoff(attempt)
+			transport.Backoff(attempt)
 		}
 	}
 	if sendErr != nil {
@@ -170,27 +170,6 @@ func send(args []string) {
 	os.Remove(pkg)
 	c.log.Say("send_done")
 	c.log.PauseIfWindows()
-}
-
-// resolveRetries picks the attempt count: the flag if set, else the setting,
-// else a default of 3.
-func resolveRetries(flag, setting int) int {
-	if flag > 0 {
-		return flag
-	}
-	if setting > 0 {
-		return setting
-	}
-	return 3
-}
-
-// backoff sleeps for a capped exponential delay before retry attempt+1.
-func backoff(attempt int) {
-	d := time.Duration(1<<attempt) * time.Second // 2s, 4s, 8s, ...
-	if d > 16*time.Second {
-		d = 16 * time.Second
-	}
-	time.Sleep(d)
 }
 
 func captureBaseline(args []string) {

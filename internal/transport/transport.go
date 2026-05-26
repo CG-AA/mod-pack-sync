@@ -6,12 +6,37 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/psanford/wormhole-william/wormhole"
 )
 
 // ProgressFunc receives transferred/total byte counts.
 type ProgressFunc func(sent, total int64)
+
+// Attempts resolves how many transfer attempts to make before giving up: the
+// flag value if set, otherwise the settings value, otherwise a default of 3.
+func Attempts(flag, setting int) int {
+	if flag > 0 {
+		return flag
+	}
+	if setting > 0 {
+		return setting
+	}
+	return 3
+}
+
+// Backoff sleeps for a capped exponential delay (2s, 4s, 8s, ... up to 16s)
+// before the next try; attempt is the 1-based number of the attempt that just
+// failed. A dropped wormhole transfer cannot resume, so each retry re-runs the
+// full handshake with a fresh code.
+func Backoff(attempt int) {
+	d := time.Duration(1<<attempt) * time.Second
+	if d > 16*time.Second {
+		d = 16 * time.Second
+	}
+	time.Sleep(d)
+}
 
 func client(relay string) *wormhole.Client {
 	c := &wormhole.Client{}

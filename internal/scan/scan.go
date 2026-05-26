@@ -26,6 +26,7 @@ import (
 var DefaultExcludes = []string{
 	// tool state and binaries (the tool lives in the instance root)
 	".modpack-sync/",
+	".modpack-sync-tmp-*", // half-written atomic-write temps a crash may leak
 	"modpack-send*",
 	"modpack-receive*",
 	"*.exe",
